@@ -34,7 +34,7 @@ router.post("/send", async (req, res) => {
         <h2>CrowdHavens Email Verification</h2>
         <p>Your OTP code is:</p>
         <h1 style="letter-spacing:3px">${code}</h1>
-        <p>This code expires in 10 minutes.</p>
+        <p>This code expires in 1 minutes.</p>
       `
     });
 

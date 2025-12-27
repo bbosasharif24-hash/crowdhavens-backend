@@ -46,10 +46,15 @@ const app = express();
    CORS CONFIG
 ===================================================== */
 const allowedOrigins = [
+  const allowedOrigins = [
   "http://localhost:3000",
   "http://localhost:5173",
   "http://localhost:5500",
   "http://127.0.0.1:5500",
+  "https://crowdhavens.com",
+  "https://www.crowdhavens.com",
+  "https://crowdhavens-frontend.vercel.app"
+];
 ];
 
 app.use(
