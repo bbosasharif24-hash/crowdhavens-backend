@@ -6,11 +6,7 @@ require("dotenv").config();
 /* =====================================================
    DEBUG: ENV CHECK (REMOVE AFTER CONFIRM)
 ===================================================== */  
-console.log("EMAIL_HOST =", process.env.EMAIL_HOST);
-console.log("EMAIL_PORT =", process.env.EMAIL_PORT);
-console.log("EMAIL_SECURE =", process.env.EMAIL_SECURE);
-console.log("EMAIL_USER =", process.env.EMAIL_USER);
-console.log("EMAIL_PASS length =", process.env.EMAIL_PASS?.length);
+console.log("POSTMARK_API_KEY =", process.env.POSTMARK_API_KEY?.slice(0, 5) + "****"); // partial mask for safety
 
 /* =====================================================
    IMPORTS (DECLARE ONCE — NO DUPLICATES)
@@ -18,11 +14,42 @@ console.log("EMAIL_PASS length =", process.env.EMAIL_PASS?.length);
 const express = require("express");
 const cors = require("cors");
 const prisma = require("./prismaClient");
+const { Client } = require("postmark"); // Postmark client
 
 /* =====================================================
-   🔥 FORCE MAILER INIT AFTER ENV IS LOADED
+   🔥 POSTMARK MAILER INIT
 ===================================================== */
-require("./utils/mailer");
+if (!process.env.POSTMARK_API_KEY) {
+  console.error("❌ Missing POSTMARK_API_KEY in environment variables.");
+  process.exit(1);
+}
+
+const mailer = new Client(process.env.POSTMARK_API_KEY);
+console.log("📧 Postmark client initialized");
+
+/**
+ * Send OTP email function
+ * @param {string} to - recipient email
+ * @param {string} code - OTP code
+ */
+async function sendOtpEmail(to, code) {
+  try {
+    await mailer.sendEmail({
+      From: process.env.POSTMARK_SENDER_EMAIL,
+      To: to,
+      Subject: "Your CrowdHavens OTP Code",
+      TextBody: `Your OTP code is: ${code}. It expires in 10 minutes.`,
+      HtmlBody: `<strong>Your OTP code is:</strong> ${code}<br/>It expires in 10 minutes.`,
+    });
+    console.log(`✅ OTP email sent to ${to}`);
+  } catch (err) {
+    console.error("❌ Failed to send OTP email:", err);
+    throw err;
+  }
+}
+
+// Make mailer available to routes
+require("./utils/mailer")(sendOtpEmail);
 
 /* =====================================================
    ROUTES
@@ -79,7 +106,6 @@ app.use(express.urlencoded({ extended: true }));
 /* =====================================================
    ROUTES
 ===================================================== */
-
 // Admin task routes
 app.use("/api/admin/task", adminTaskRoutes);
 
