@@ -5,51 +5,22 @@ require("dotenv").config();
 
 /* =====================================================
    DEBUG: ENV CHECK (REMOVE AFTER CONFIRM)
-===================================================== */  
-console.log("POSTMARK_API_KEY =", process.env.POSTMARK_API_KEY?.slice(0, 5) + "****"); // partial mask for safety
+===================================================== */
+if (!process.env.POSTMARK_API_KEY) {
+  console.error("❌ POSTMARK_API_KEY is missing");
+} else {
+  console.log(
+    "POSTMARK_API_KEY loaded:",
+    process.env.POSTMARK_API_KEY.slice(0, 5) + "****"
+  );
+}
 
 /* =====================================================
-   IMPORTS (DECLARE ONCE — NO DUPLICATES)
+   IMPORTS
 ===================================================== */
 const express = require("express");
 const cors = require("cors");
 const prisma = require("./prismaClient");
-const { Client } = require("postmark"); // Postmark client
-
-/* =====================================================
-   🔥 POSTMARK MAILER INIT
-===================================================== */
-if (!process.env.POSTMARK_API_KEY) {
-  console.error("❌ Missing POSTMARK_API_KEY in environment variables.");
-  process.exit(1);
-}
-
-const mailer = new Client(process.env.POSTMARK_API_KEY);
-console.log("📧 Postmark client initialized");
-
-/**
- * Send OTP email function
- * @param {string} to - recipient email
- * @param {string} code - OTP code
- */
-async function sendOtpEmail(to, code) {
-  try {
-    await mailer.sendEmail({
-      From: process.env.POSTMARK_SENDER_EMAIL,
-      To: to,
-      Subject: "Your CrowdHavens OTP Code",
-      TextBody: `Your OTP code is: ${code}. It expires in 10 minutes.`,
-      HtmlBody: `<strong>Your OTP code is:</strong> ${code}<br/>It expires in 10 minutes.`,
-    });
-    console.log(`✅ OTP email sent to ${to}`);
-  } catch (err) {
-    console.error("❌ Failed to send OTP email:", err);
-    throw err;
-  }
-}
-
-// Make mailer available to routes
-require("./utils/mailer")(sendOtpEmail);
 
 /* =====================================================
    ROUTES
@@ -58,13 +29,9 @@ const authRoutes = require("./routes/auth");
 const otpRoutes = require("./routes/otp");
 const interviewRoutes = require("./routes/interview");
 
-/* 🔐 ADMIN INTERVIEW REVIEW (PRIVATE) */
 const interviewReviewRoutes = require("./routes/interviewReview.routes");
 const adminInterviewOnly = require("./middleware/adminInterviewOnly");
 
-/* =====================================================
-   CLIENT ROUTES
-===================================================== */
 const depositRoutes = require("./routes/deposit");
 const withdrawRoutes = require("./routes/withdraw");
 const taskRoutes = require("./routes/task");
@@ -73,10 +40,10 @@ const adminTaskRoutes = require("./routes/adminTask");
 /* =====================================================
    APP INIT
 ===================================================== */
-const app = express(); // ✅ must be declared BEFORE any app.use()
+const app = express();
 
 /* =====================================================
-   CORS CONFIG (FRONTEND SAFE)
+   CORS CONFIG
 ===================================================== */
 const allowedOrigins = [
   "http://localhost:3000",
@@ -88,7 +55,7 @@ const allowedOrigins = [
 app.use(
   cors({
     origin: (origin, callback) => {
-      if (!origin) return callback(null, true); // allow Postman, curl, etc.
+      if (!origin) return callback(null, true);
       if (allowedOrigins.includes(origin)) return callback(null, true);
       console.error("❌ CORS blocked:", origin);
       return callback(new Error("CORS not allowed"));
@@ -104,32 +71,29 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 /* =====================================================
-   ROUTES
+   API ROUTES
 ===================================================== */
-// Admin task routes
-app.use("/api/admin/task", adminTaskRoutes);
-
-// Public / Auth routes
 app.use("/api/auth", authRoutes);
 app.use("/api/otp", otpRoutes);
 app.use("/api/interview", interviewRoutes);
 
-// Admin interview review
 app.use(
   "/api/interview-review",
   adminInterviewOnly,
   interviewReviewRoutes
 );
 
-// Client routes
+app.use("/api/admin/task", adminTaskRoutes);
 app.use("/api/client/deposit", depositRoutes);
 app.use("/api/client/withdraw", withdrawRoutes);
 app.use("/api/client/task", taskRoutes);
 
 /* =====================================================
-   HEALTH ROUTES
+   HEALTH CHECKS
 ===================================================== */
-app.get("/", (req, res) => res.send("✅ CrowdHavens backend is running"));
+app.get("/", (req, res) => {
+  res.send("✅ CrowdHavens backend is running");
+});
 
 app.get("/__health/db", async (req, res) => {
   try {
