@@ -7,10 +7,171 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+/* =========================
+   USER
+   ========================= */
 model User {
-  id        String   @id @default(cuid())
-  email     String   @unique
-  name      String?
-  password  String
+  id                   String             @id @default(uuid())
+  email                String             @unique
+  passwordHash         String
+  role                 Role               @default(WORKER)
+  createdAt            DateTime           @default(now())
+
+  /* Verification & Progress */
+  emailVerified        Boolean            @default(false)
+  verificationStatus   VerificationStatus @default(UNVERIFIED)
+  kycStatus            KycStatus          @default(NONE)
+
+  /* Interview lifecycle (for workers) */
+  interviewStatus      InterviewStatus    @default(NOT_STARTED)
+  interviewSubmittedAt DateTime?
+  interviewReviewedAt  DateTime?
+  interviewFailedAt    DateTime?
+
+  /* Relations */
+  interview            Interview?
+  wallet               Wallet?
+  otps                 EmailOtp[]
+  tasks                Task[]             // tasks created by client users
+
+  referredBy           String?
+}
+
+/* =========================
+   INTERVIEW (Workers Only)
+   ========================= */
+model Interview {
+  id         String          @id @default(uuid())
+  userId     String          @unique
+  answers    Json
+  status     InterviewStatus @default(PENDING_REVIEW)
+  adminNote  String?
+  reviewedBy String?
+  createdAt  DateTime        @default(now())
+  reviewedAt DateTime?
+  retryAfter DateTime?       // 3-day cooldown
+
+  user       User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+/* =========================
+   WALLET
+   ========================= */
+model Wallet {
+  id              String   @id @default(uuid())
+  userId          String   @unique
+  totalDeposited  Decimal  @default(0)    // total ever deposited
+  unusedBalance   Decimal  @default(0)    // withdrawable
+  lockedFunds     Decimal  @default(0)    // tasks live or under review
+
+  user            User     @relation(fields: [userId], references: [id])
+  transactions    WalletTransaction[]
+}
+
+/* =========================
+   WALLET TRANSACTIONS
+   ========================= */
+model WalletTransaction {
+  id            String          @id @default(uuid())
+  walletId      String
+  type          TransactionType
+  amount        Decimal
+  platformFee   Decimal         @default(0)
+
+  // AirTM / provider fields
+  status        TransactionStatus @default(PENDING)
+  provider      String?
+  providerTxId  String?
+  externalData  Json?
+
+  createdAt     DateTime        @default(now())
+
+  wallet        Wallet          @relation(fields: [walletId], references: [id])
+}
+
+enum TransactionType {
+  DEPOSIT
+  WITHDRAWAL
+  FEE
+  LOCK
+  UNLOCK
+  ESCROW
+}
+
+enum TransactionStatus {
+  PENDING
+  CONFIRMED
+  FAILED
+}
+
+/* =========================
+   TASKS (Client Marketplace)
+   ========================= */
+model Task {
+  id                String       @id @default(uuid())
+  clientId          String
+  title             String
+  description       String
+  taskType          String
+  instructions      String
+  proofRequired     Boolean
+  rewardPerWorker   Decimal
+  numberOfWorkers   Int
+  totalCost         Decimal
+  status            TaskStatus   @default(DRAFT)
+  rejectionReason   String?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  client            User         @relation(fields: [clientId], references: [id])
+}
+
+enum TaskStatus {
+  DRAFT
+  PENDING_ADMIN_APPROVAL
+  LIVE
+  UNDER_REVIEW
+  CLOSED
+}
+
+/* =========================
+   EMAIL OTP
+   ========================= */
+model EmailOtp {
+  id        String   @id @default(uuid())
+  userId    String
+  code      String
+  expiresAt DateTime
+  attempts  Int      @default(0)
   createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id])
+}
+
+/* =========================
+   ENUMS
+   ========================= */
+enum Role {
+  WORKER
+  CLIENT
+  ADMIN
+}
+
+enum KycStatus {
+  NONE
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum InterviewStatus {
+  NOT_STARTED
+  PENDING_REVIEW
+  REJECTED
+  APPROVED
+}
+
+enum VerificationStatus {
+  UNVERIFIED
+  VERIFIED
 }
