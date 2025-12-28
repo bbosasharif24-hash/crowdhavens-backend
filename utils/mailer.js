@@ -19,7 +19,7 @@ const client = POSTMARK_API_KEY
 /**
  * Send OTP Email
  */
-async function sendEmail({ to, subject, html }) {
+async function sendOtpEmail(to, code) {
   if (!client) {
     console.error("❌ Postmark client not initialized");
     return;
@@ -29,8 +29,13 @@ async function sendEmail({ to, subject, html }) {
     await client.sendEmail({
       From: FROM_EMAIL,
       To: to,
-      Subject: subject,
-      HtmlBody: html,
+      Subject: "Your CrowdHavens Verification Code",
+      HtmlBody: `
+        <h2>CrowdHavens Email Verification</h2>
+        <p>Your OTP code is:</p>
+        <h1 style="letter-spacing:3px">${code}</h1>
+        <p>This code expires in 10 minutes.</p>
+      `,
       MessageStream: "outbound",
     });
 
@@ -41,4 +46,4 @@ async function sendEmail({ to, subject, html }) {
   }
 }
 
-module.exports = sendEmail;
+module.exports = { sendOtpEmail }; // ✅ named export
