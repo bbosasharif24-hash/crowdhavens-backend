@@ -1,7 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const prisma = require("../prismaClient");
-const sendEmail = require("../utils/mailer"); // ✅ fixed import
+const { sendOtpEmail } = require("../utils/mailer"); // ✅ use correct named export
 
 // =======================
 // SEND OTP
@@ -26,19 +26,11 @@ router.post("/send", async (req, res) => {
       }),
     ]);
 
-    // Send OTP email via Postmark
-    await sendEmail({
-      to: email,
-      subject: "Your CrowdHavens Verification Code",
-      html: `
-        <h2>CrowdHavens Email Verification</h2>
-        <p>Your OTP code is:</p>
-        <h1 style="letter-spacing:3px">${code}</h1>
-        <p>This code expires in 10 minutes.</p>
-      `,
-    });
+    // Log OTP for debugging
+    console.log(`🔐 OTP GENERATED for ${email} (USER ${userId}): ${code}`);
 
-    console.log(`🔐 OTP SENT to ${email} for USER ${userId}`);
+    // Send OTP email via Postmark (or SMTP)
+    await sendOtpEmail(email, code);
 
     return res.json({
       success: true,
@@ -61,6 +53,7 @@ router.post("/verify", async (req, res) => {
   }
 
   try {
+    // Find OTP in DB that is still valid
     const otp = await prisma.emailOtp.findFirst({
       where: {
         userId,
@@ -70,9 +63,11 @@ router.post("/verify", async (req, res) => {
     });
 
     if (!otp) {
+      console.log(`❌ OTP verification failed for USER ${userId} with code ${code}`);
       return res.status(400).json({ error: "Invalid or expired OTP" });
     }
 
+    // Mark user email verified and delete OTP
     await prisma.$transaction([
       prisma.user.update({
         where: { id: userId },
