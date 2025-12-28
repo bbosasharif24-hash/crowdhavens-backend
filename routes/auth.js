@@ -19,14 +19,12 @@ router.post("/signup/client", async (req, res) => {
       return res.status(400).json({ error: "Password must be at least 8 characters long" });
     }
 
-    // Turnstile verification (skip in dev)
-    if (process.env.NODE_ENV !== "production") {
-      console.log("⚠️ Turnstile skipped (dev mode)");
+    // Turnstile verification (bypass if TURNSTILE_BYPASS=true)
+    if (process.env.TURNSTILE_BYPASS === "true") {
+      console.log("⚠️ Turnstile skipped (bypass active)");
     } else {
       const turnstileToken = req.body["cf-turnstile-response"];
-      if (!turnstileToken) {
-        return res.status(400).json({ error: "Missing bot verification" });
-      }
+      if (!turnstileToken) return res.status(400).json({ error: "Missing bot verification" });
       const isHuman = await verifyTurnstile(turnstileToken);
       if (!isHuman) return res.status(403).json({ error: "Robot detected" });
     }
@@ -82,9 +80,9 @@ router.post("/signup/worker", async (req, res) => {
       return res.status(400).json({ error: "Password must be at least 8 characters long" });
     }
 
-    // Turnstile verification (skip in dev)
-    if (process.env.NODE_ENV !== "production") {
-      console.log("⚠️ Turnstile skipped (dev mode)");
+    // Turnstile verification (bypass if TURNSTILE_BYPASS=true)
+    if (process.env.TURNSTILE_BYPASS === "true") {
+      console.log("⚠️ Turnstile skipped (bypass active)");
     } else {
       const turnstileToken = req.body["cf-turnstile-response"];
       if (!turnstileToken) return res.status(400).json({ error: "Missing bot verification" });
