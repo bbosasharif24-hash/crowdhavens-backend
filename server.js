@@ -1,3 +1,5 @@
+console.log("TURNSTILE_BYPASS =", process.env.TURNSTILE_BYPASS);
+
 // =====================================================
 // 🔥 ENV MUST LOAD FIRST
 // =====================================================
