@@ -1,7 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const prisma = require("../prismaClient");
-const { sendEmail } = require("../utils/mailer"); // ✅ Postmark mailer
+const sendEmail = require("../utils/mailer"); // ✅ fixed import
 
 // =======================
 // SEND OTP
@@ -22,8 +22,8 @@ router.post("/send", async (req, res) => {
     await prisma.$transaction([
       prisma.emailOtp.deleteMany({ where: { userId } }),
       prisma.emailOtp.create({
-        data: { userId, code, expiresAt }
-      })
+        data: { userId, code, expiresAt },
+      }),
     ]);
 
     // Send OTP email via Postmark
@@ -34,17 +34,16 @@ router.post("/send", async (req, res) => {
         <h2>CrowdHavens Email Verification</h2>
         <p>Your OTP code is:</p>
         <h1 style="letter-spacing:3px">${code}</h1>
-        <p>This code expires in 1 minutes.</p>
-      `
+        <p>This code expires in 10 minutes.</p>
+      `,
     });
 
     console.log(`🔐 OTP SENT to ${email} for USER ${userId}`);
 
     return res.json({
       success: true,
-      message: "OTP sent successfully"
+      message: "OTP sent successfully",
     });
-
   } catch (err) {
     console.error("❌ OTP SEND ERROR:", err);
     return res.status(500).json({ error: "Failed to send OTP" });
@@ -66,8 +65,8 @@ router.post("/verify", async (req, res) => {
       where: {
         userId,
         code,
-        expiresAt: { gt: new Date() }
-      }
+        expiresAt: { gt: new Date() },
+      },
     });
 
     if (!otp) {
@@ -77,18 +76,17 @@ router.post("/verify", async (req, res) => {
     await prisma.$transaction([
       prisma.user.update({
         where: { id: userId },
-        data: { emailVerified: true }
+        data: { emailVerified: true },
       }),
-      prisma.emailOtp.deleteMany({ where: { userId } })
+      prisma.emailOtp.deleteMany({ where: { userId } }),
     ]);
 
     console.log(`✅ OTP VERIFIED for USER ${userId}`);
 
     return res.json({
       success: true,
-      message: "OTP verified successfully"
+      message: "OTP verified successfully",
     });
-
   } catch (err) {
     console.error("❌ OTP VERIFY ERROR:", err);
     return res.status(500).json({ error: "Verification failed" });

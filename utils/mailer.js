@@ -9,7 +9,7 @@ const { POSTMARK_API_KEY, FROM_EMAIL } = process.env;
 
 if (!POSTMARK_API_KEY || !FROM_EMAIL) {
   console.error("❌ Missing POSTMARK_API_KEY or FROM_EMAIL");
-  // ❗ DO NOT crash the server on Render
+  // ❗ Do not crash the server on Render
 }
 
 const client = POSTMARK_API_KEY
@@ -19,7 +19,7 @@ const client = POSTMARK_API_KEY
 /**
  * Send OTP Email
  */
-async function sendOtpEmail(to, code) {
+async function sendEmail({ to, subject, html }) {
   if (!client) {
     console.error("❌ Postmark client not initialized");
     return;
@@ -29,13 +29,8 @@ async function sendOtpEmail(to, code) {
     await client.sendEmail({
       From: FROM_EMAIL,
       To: to,
-      Subject: "Your CrowdHavens Verification Code",
-      HtmlBody: `
-        <h2>CrowdHavens Email Verification</h2>
-        <p>Your OTP code is:</p>
-        <h1 style="letter-spacing:3px">${code}</h1>
-        <p>This code expires in 10 minutes.</p>
-      `,
+      Subject: subject,
+      HtmlBody: html,
       MessageStream: "outbound",
     });
 
@@ -46,4 +41,4 @@ async function sendOtpEmail(to, code) {
   }
 }
 
-module.exports = { sendOtpEmail };
+module.exports = sendEmail;
