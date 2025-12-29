@@ -10,8 +10,9 @@ const prisma = require("../prismaClient");
  */
 const ALLOWED_ADMIN_EMAILS = [
   "director@crowdhavens.com",
-  "admin1@crowdhavens.com",
+  "lewis@crowdhavens.com",
   "admin3@crowdhavens.com"
+  
 ];
 
 module.exports = async function adminInterviewOnly(req, res, next) {
