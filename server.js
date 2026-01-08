@@ -15,6 +15,8 @@ const prisma = require("./prismaClient");
 /* =====================================================
    ROUTES
 ===================================================== */
+const userRoutes = require("./routes/user.routes");
+const verificationRoutes = require("./routes/verification.routes");
 const authRoutes = require("./routes/auth");
 const otpRoutes = require("./routes/otp");
 const interviewRoutes = require("./routes/interview");
@@ -24,6 +26,7 @@ const depositRoutes = require("./routes/deposit");
 const withdrawRoutes = require("./routes/withdraw");
 const taskRoutes = require("./routes/task");
 const adminTaskRoutes = require("./routes/adminTask");
+
 
 /* =====================================================
    APP INIT
@@ -86,6 +89,8 @@ app.use("/api/admin/task", adminTaskRoutes);
 app.use("/api/client/deposit", depositRoutes);
 app.use("/api/client/withdraw", withdrawRoutes);
 app.use("/api/client/task", taskRoutes);
+app.use("/api/user", userRoutes);
+app.use("/api/verification", verificationRoutes);
 
 /* =====================================================
    HEALTH CHECKS
@@ -112,6 +117,16 @@ app.use((err, req, res, next) => {
 
   res.status(500).json({
     error: "Internal server error",
+  });
+});
+
+/* =====================================================
+   404 NOT FOUND HANDLER (MUST SEND JSON)
+===================================================== */
+app.use((req, res, next) => {
+  res.status(404).json({
+    error: "Route not found",
+    path: req.originalUrl
   });
 });
 

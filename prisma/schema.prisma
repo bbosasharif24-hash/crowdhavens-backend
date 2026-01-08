@@ -17,6 +17,13 @@ model User {
   role                 Role               @default(WORKER)
   createdAt            DateTime           @default(now())
 
+  /* Profile Data (Updated for Dashboard) */
+  fullName             String?
+  telephone            String?
+  country              String?
+  place                String?
+  paymentEmail         String?            // Optional override for PayPal/Bank
+
   /* Verification & Progress */
   emailVerified        Boolean            @default(false)
   verificationStatus   VerificationStatus @default(UNVERIFIED)
@@ -28,17 +35,20 @@ model User {
   interviewReviewedAt  DateTime?
   interviewFailedAt    DateTime?
 
+  /* Referral Tracking */
+  referredBy           String?
+
   /* Relations */
   interview            Interview?
   wallet               Wallet?
   otps                 EmailOtp[]
-  tasks                Task[]             // tasks created by client users
-
-  referredBy           String?
+  tasks                Task[]             // Tasks created by client users
+  submissions          TaskSubmission[]   // Tasks submitted by workers
+  verifications        VerificationRequest[] // $1 Verification requests
 }
 
 /* =========================
-   INTERVIEW (Workers Only)
+   INTERVIEW (Workers Only) - UNCHANGED
    ========================= */
 model Interview {
   id         String          @id @default(uuid())
@@ -55,7 +65,7 @@ model Interview {
 }
 
 /* =========================
-   WALLET
+   WALLET - UNCHANGED
    ========================= */
 model Wallet {
   id              String   @id @default(uuid())
@@ -69,7 +79,7 @@ model Wallet {
 }
 
 /* =========================
-   WALLET TRANSACTIONS
+   WALLET TRANSACTIONS - UNCHANGED
    ========================= */
 model WalletTransaction {
   id            String          @id @default(uuid())
@@ -89,53 +99,86 @@ model WalletTransaction {
   wallet        Wallet          @relation(fields: [walletId], references: [id])
 }
 
-enum TransactionType {
-  DEPOSIT
-  WITHDRAWAL
-  FEE
-  LOCK
-  UNLOCK
-  ESCROW
-}
-
-enum TransactionStatus {
-  PENDING
-  CONFIRMED
-  FAILED
-}
-
 /* =========================
-   TASKS (Client Marketplace)
+   TASKS (Client Marketplace) - UPDATED
    ========================= */
 model Task {
   id                String       @id @default(uuid())
   clientId          String
   title             String
   description       String
-  taskType          String
-  instructions      String
-  proofRequired     Boolean
+  instructions      String?
+  taskType          String          // "Data Entry", "AI Training"
+  proofRequired     Boolean      @default(true)
   rewardPerWorker   Decimal
   numberOfWorkers   Int
   totalCost         Decimal
+  
+  /* Pricing Workflow Fields */
+  clientBudget      Decimal?        // Client's initial proposal
+  adminPrice        Decimal?        // Final price set by Admin
+  
   status            TaskStatus   @default(DRAFT)
   rejectionReason   String?
   createdAt         DateTime     @default(now())
   updatedAt         DateTime     @updatedAt
 
   client            User         @relation(fields: [clientId], references: [id])
-}
-
-enum TaskStatus {
-  DRAFT
-  PENDING_ADMIN_APPROVAL
-  LIVE
-  UNDER_REVIEW
-  CLOSED
+  submissions       TaskSubmission[]
 }
 
 /* =========================
-   EMAIL OTP
+   TASK SUBMISSION (NEW)
+   ========================= */
+model TaskSubmission {
+  id            String              @id @default(uuid())
+  taskId        String
+  workerId      String
+  proof         String              // URL, Text, or ID
+  status        SubmissionStatus    @default(PENDING)
+  submittedAt   DateTime            @default(now())
+  
+  // Relations
+  task          Task                @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  worker        User                @relation(fields: [workerId], references: [id])
+}
+
+/* =========================
+   VERIFICATION REQUEST (NEW - $1 Fee)
+   ========================= */
+model VerificationRequest {
+  id            String                    @id @default(uuid())
+  userId        String
+  name          String                     // Name entered in Dashboard
+  email         String                     // Email entered in Dashboard
+  method        String                     // "Airtel", "MTN", "PayPal", etc.
+  txId          String                     // Transaction ID
+  amount        Decimal       @default(1.00)
+  status        VerificationRequestStatus @default(PENDING)
+  createdAt     DateTime                   @default(now())
+  
+  // Helper to prevent double paying referral
+  referralTriggered Boolean @default(false)
+
+  user          User                       @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+/* =========================
+   REFERRAL PAYOUT (NEW - $0.50 Bonus)
+   ========================= */
+model ReferralPayout {
+  id            String          @id @default(uuid())
+  referrerEmail String          // Who gets the money
+  newUserEmail  String          // Who signed up
+  amount        Decimal         @default(0.50)
+  status        PayoutStatus    @default(LOGGED) // 'LOGGED' means the backend recorded it
+  createdAt     DateTime        @default(now())
+  
+  // Optional: Link to the new user if needed, but email is usually enough for tracking
+}
+
+/* =========================
+   EMAIL OTP - UNCHANGED
    ========================= */
 model EmailOtp {
   id        String   @id @default(uuid())
@@ -174,4 +217,44 @@ enum InterviewStatus {
 enum VerificationStatus {
   UNVERIFIED
   VERIFIED
+}
+
+enum TransactionType {
+  DEPOSIT
+  WITHDRAWAL
+  FEE
+  LOCK
+  UNLOCK
+  ESCROW
+}
+
+enum TransactionStatus {
+  PENDING
+  CONFIRMED
+  FAILED
+}
+
+enum TaskStatus {
+  DRAFT
+  PENDING_PRICING     // Admin needs to set price
+  AWAITING_FUNDING    // Client needs to deposit funds
+  LIVE
+  CLOSED
+}
+
+enum SubmissionStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum VerificationRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum PayoutStatus {
+  LOGGED    // Successfully recorded in system
+  PAID      // Processed to wallet
 }
