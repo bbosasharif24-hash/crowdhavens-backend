@@ -1,114 +1,105 @@
 const express = require("express");
-const router = express.Router();
 const prisma = require("../prismaClient");
+const { requireUser } = require("../middleware/authMiddleware");
 
-// ================= AUTH MIDDLEWARE =================
-// Ensure only logged-in Clients can access these routes
-// Matches frontend expectation of userId in header (from login)
-const checkClient = async (req, res, next) => {
-  const userId = req.headers["x-user-id"]; 
-  
-  if (!userId) {
-    return res.status(401).json({ error: "Unauthorized: No User ID provided" });
-  }
+const router = express.Router();
 
-  // Optional: Verify role in DB is CLIENT (More secure than trusting header)
-  // This adds a bit of latency but ensures data integrity
+// 🔒 All routes in this file require authentication
+router.use(requireUser);
+
+// ========================
+// 1. GET CLIENT BALANCE
+// ========================
+router.get("/balance", async (req, res) => {
   try {
-    const user = await prisma.user.findUnique({
-      where: { id: userId }
-    });
-    
-    if (!user || user.role !== "CLIENT") {
-      return res.status(403).json({ error: "Access Denied: Clients only" });
-    }
-    
-    req.clientId = userId; // Attach to request for easy access
-    next();
-  } catch (err) {
-    console.error("Auth check error:", err);
-    // On DB connection error, we might fail to get user.
-    // For now, we proceed assuming header is correct to avoid locking valid clients if DB is down.
-    req.clientId = userId;
-    next();
-  }
-};
+    // req.user is attached by our middleware
+    const userId = req.user.id;
 
-// ================= ROUTES =================
-
-// 1. GET WALLET BALANCE
-router.get("/balance", checkClient, async (req, res) => {
-  try {
-    const user = await prisma.user.findUnique({
-      where: { id: req.clientId }
+    // Find wallet for this user
+    const wallet = await prisma.wallet.findUnique({
+      where: { userId: userId }
     });
 
-    if (!user) {
-      return res.status(404).json({ error: "User not found" });
+    if (!wallet) {
+      // Return 0 if no wallet exists yet
+      return res.json({ balance: 0.00 });
     }
 
-    // Return the real balance from Database
-    res.json({
-      balance: parseFloat(user.balance) || 0.00
-    });
+    res.json({ balance: wallet.unusedBalance });
 
   } catch (error) {
-    console.error("Get Balance Error:", error);
+    console.error("Error fetching balance:", error);
     res.status(500).json({ error: "Failed to fetch balance" });
   }
 });
 
-// 2. CREATE TASK PROPOSAL
-router.post("/task", checkClient, async (req, res) => {
+// ========================
+// 2. GET CLIENT TASKS
+// ========================
+router.get("/tasks", async (req, res) => {
   try {
-    const { title, type, desc, clientBudget, taskQty } = req.body;
+    const userId = req.user.id;
 
-    if (!title || !desc) {
-      return res.status(400).json({ error: "Title and Description are required" });
-    }
-
-    const newTask = await prisma.task.create({
-      data: {
-        clientId: req.clientId,
-        clientEmail: (await prisma.user.findUnique({ where: { id: req.clientId } })).email, // Store email for matching wallet
-        title,
-        type,
-        desc,
-        instructions: desc,
-        proofRequired: true,
-        rewardPerWorker: clientBudget, // Initial budget
-        numberOfWorkers: parseInt(taskQty),
-        totalCost: clientBudget * parseInt(taskQty), // Calculated total
-        clientBudget: parseFloat(clientBudget), // Save proposal
-        adminPrice: null, // Not set yet
-        status: 'PENDING_PRICING', // Matches Schema Enum
-        date: new Date().toLocaleDateString()
-      }
-    });
-
-    // Return the EXACT task object created (includes Prisma ID)
-    // The Frontend uses this returned object to update its local list
-    res.status(201).json(newTask);
-
-  } catch (error) {
-    console.error("Create Task Error:", error);
-    res.status(500).json({ error: "Failed to create task proposal" });
-  }
-});
-
-// 3. GET TASKS (Load Client's Tasks)
-router.get("/tasks", checkClient, async (req, res) => {
-  try {
+    // Fetch all tasks where clientId matches the logged-in user
     const tasks = await prisma.task.findMany({
-      where: { clientId: req.clientId },
+      where: { clientId: userId },
       orderBy: { createdAt: 'desc' }
     });
 
     res.json(tasks);
 
   } catch (error) {
-    console.error("Get Tasks Error:", error);
-    res.status(500).json({ error: "Failed to load tasks" });
+    console.error("Error fetching tasks:", error);
+    res.status(500).json({ error: "Failed to fetch tasks" });
+  }
+});
+
+// ========================
+// 3. CREATE NEW TASK (PROPOSAL)
+// ========================
+router.post("/task", async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { title, type, desc, clientBudget, taskQty } = req.body;
+
+    // Validation
+    if (!title || !desc || !clientBudget || !taskQty) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    const qty = parseInt(taskQty);
+    const totalBudget = parseFloat(clientBudget);
+
+    if (qty <= 0 || totalBudget <= 0) {
+      return res.status(400).json({ error: "Quantity and Budget must be positive" });
+    }
+
+    // Calculate per-worker pay
+    // Note: We assume clientBudget is the TOTAL amount they want to spend
+    const rewardPerWorker = totalBudget / qty;
+
+    // Create the Task
+    const newTask = await prisma.task.create({
+      data: {
+        clientId: userId,
+        title: title,
+        taskType: type, // Mapping frontend 'type' to schema 'taskType'
+        description: desc,
+        instructions: desc, // Re-using description for instructions for now
+        clientBudget: totalBudget,
+        adminPrice: null, // Admin sets this later
+        rewardPerWorker: rewardPerWorker,
+        numberOfWorkers: qty,
+        totalCost: totalBudget,
+        status: "PENDING_PRICING" // Skip DRAFT, go straight to Admin Review
+      }
+    });
+
+    res.status(201).json(newTask);
+
+  } catch (error) {
+    console.error("Error creating task:", error);
+    res.status(500).json({ error: "Failed to create task" });
   }
 });
 
