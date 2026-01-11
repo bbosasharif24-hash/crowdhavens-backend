@@ -8,7 +8,40 @@ const router = express.Router();
 router.use(requireUser);
 
 // ========================
-// 1. GET CLIENT BALANCE
+// 0. GET CLIENT PROFILE & BALANCE
+// ========================
+router.get("/me", async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    // 1. Get Wallet
+    const wallet = await prisma.wallet.findUnique({
+      where: { userId: userId }
+    });
+
+    // 2. Return combined data
+    res.json({
+      // User Profile Data
+      id: req.user.id,
+      email: req.user.email,
+      fullName: req.user.fullName || "", // Safe access
+      country: req.user.country || "",
+      place: req.user.place || "",
+      telephone: req.user.telephone || "",
+      role: req.user.role,
+      
+      // Wallet Data
+      walletBalance: wallet ? wallet.unusedBalance : 0.00
+    });
+
+  } catch (error) {
+    console.error("Error fetching client profile:", error);
+    res.status(500).json({ error: "Failed to fetch profile" });
+  }
+});
+
+// ========================
+// 1. GET CLIENT BALANCE (Legacy Support)
 // ========================
 router.get("/balance", async (req, res) => {
   try {
