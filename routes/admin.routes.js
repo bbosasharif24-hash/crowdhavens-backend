@@ -428,30 +428,44 @@ router.get("/referrals", async (req, res) => {
 });
 
 // ========================
+
+
+  // ========================
 // 8. ADMIN CREATE TASK
 // ========================
-
-// Create Task Directly (Skip Pricing)
 router.post("/tasks/create", async (req, res) => {
   try {
     if (req.user.role !== "ADMIN") return res.status(403).json({ error: "Admin only" });
 
     const { title, type, description, rewardPerWorker, numberOfWorkers, totalCost } = req.body;
 
-    // Admin creates task as LIVE immediately
+    // 1. Validation
+    if (!title || !type || !description) {
+      return res.status(400).json({ error: "Missing required text fields" });
+    }
+
+    const workers = parseInt(numberOfWorkers);
+    const reward = parseFloat(rewardPerWorker);
+    const total = parseFloat(totalCost);
+
+    if (isNaN(workers) || isNaN(reward) || isNaN(total)) {
+      return res.status(400).json({ error: "Invalid numeric values" });
+    }
+
+    // 2. Create Task
     const newTask = await prisma.task.create({
       data: {
-        clientId: req.user.id, // Admin acts as client
-        title,
-        taskType: type,
-        description,
+        clientId: req.user.id, // Auth ensures this exists
+        title: title,
+        taskType: type,         // Frontend sends 'type'
+        description: description,
         instructions: description,
-        rewardPerWorker: parseFloat(rewardPerWorker),
-        numberOfWorkers: parseInt(numberOfWorkers),
-        totalCost: parseFloat(totalCost),
-        clientBudget: parseFloat(totalCost),
-        adminPrice: parseFloat(rewardPerWorker), // Admin sets the final price directly
-        status: "LIVE"
+        rewardPerWorker: reward, // Prisma Decimal
+        numberOfWorkers: workers,   // Prisma Int
+        totalCost: total,         // Prisma Decimal
+        clientBudget: total,
+        adminPrice: reward,         // Admin sets final price directly
+        status: "LIVE"             // Admin tasks go live immediately
       }
     });
 
@@ -459,6 +473,10 @@ router.post("/tasks/create", async (req, res) => {
 
   } catch (error) {
     console.error("Error creating admin task:", error);
+    // Catch Prisma validation errors specifically
+    if (error.code === 'P2002') { 
+       return res.status(400).json({ error: "Invalid data input" });
+    }
     res.status(500).json({ error: "Failed to create task" });
   }
 });
