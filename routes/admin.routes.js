@@ -3,7 +3,7 @@ const router = express.Router();
 const prisma = require("../prismaClient");
 
 // ================= MIDDLEWARE =================
-// Simple check to ensure user is admin (Assuming auth is handled globally or via header)
+// Simple check to ensure user is admin
 const isAdmin = async (req, res, next) => {
   const userId = req.headers["x-user-id"];
   if (!userId) return res.status(401).json({ error: "Unauthorized" });
@@ -23,7 +23,7 @@ router.use(isAdmin);
 // Helper to safely convert Prisma Decimals to Numbers for JSON responses
 const safeJson = (data) => {
   return JSON.parse(JSON.stringify(data, (key, value) =>
-    typeof value === 'bigint' ? value.toString() : value // or handle Decimal
+    typeof value === 'bigint' ? value.toString() : value
   ));
 };
 
@@ -106,14 +106,12 @@ router.post("/verifications/:id/:action(approve|reject)", async (req, res) => {
 
       // 2. Handle Referral ($0.50 Bonus)
       if (verif.user.referredBy && !verif.referralTriggered) {
-        // Find the referrer by email (Schema says referredBy is String email)
         const referrer = await prisma.user.findUnique({
           where: { email: verif.user.referredBy },
           include: { wallet: true }
         });
 
         if (referrer && referrer.wallet) {
-          // Log Payout
           await prisma.referralPayout.create({
             data: {
               referrerEmail: referrer.email,
@@ -123,15 +121,11 @@ router.post("/verifications/:id/:action(approve|reject)", async (req, res) => {
             }
           });
 
-          // Pay Referrer
           await prisma.wallet.update({
             where: { id: referrer.wallet.id },
-            data: {
-              unusedBalance: { increment: 0.50 }
-            }
+            data: { unusedBalance: { increment: 0.50 } }
           });
 
-          // Mark referral as triggered in verification request
           await prisma.verificationRequest.update({
             where: { id },
             data: { referralTriggered: true }
@@ -172,7 +166,6 @@ router.post("/tasks/:id/set-price", async (req, res) => {
         data: { status: "REJECTED", rejectionReason: "Admin rejected proposal" }
       });
     } else if (action === "approved") {
-      // Calculate Total Cost based on Admin Price
       const task = await prisma.task.findUnique({ where: { id } });
       const totalCost = parseFloat(adminPrice) * task.numberOfWorkers;
 
@@ -181,7 +174,7 @@ router.post("/tasks/:id/set-price", async (req, res) => {
         data: {
           adminPrice: parseFloat(adminPrice),
           totalCost: totalCost,
-          status: "AWAITING_FUNDING" // Move to next stage
+          status: "AWAITING_FUNDING"
         }
       });
     }
@@ -226,13 +219,11 @@ router.post("/transactions/:id/approve-deposit", async (req, res) => {
       return res.status(400).json({ error: "Invalid transaction" });
     }
 
-    // Update Transaction Status
     await prisma.walletTransaction.update({
       where: { id },
       data: { status: "CONFIRMED" }
     });
 
-    // Add funds to Wallet
     await prisma.wallet.update({
       where: { id: tx.walletId },
       data: {
@@ -274,11 +265,8 @@ router.post("/transactions/:id/approve-withdrawal", async (req, res) => {
   try {
     await prisma.walletTransaction.update({
       where: { id },
-      data: { status: "CONFIRMED" } // Or a specific PAID status if you prefer
+      data: { status: "CONFIRMED" } 
     });
-
-    // Note: The funds were likely locked/deducted when the request was created. 
-    // If not, deduct unusedBalance here. Assuming standard flow where funds are locked on request.
 
     res.json({ success: true });
   } catch (err) {
@@ -320,24 +308,19 @@ router.post("/submissions/:id/:action(approve|reject)", async (req, res) => {
 
     const newStatus = action === "approve" ? "APPROVED" : "REJECTED";
 
-    // Update Submission
     await prisma.taskSubmission.update({
       where: { id },
       data: { status: newStatus }
     });
 
-    // If Approved, Pay Worker and Handle Task Finances
     if (action === "approve") {
       const reward = parseFloat(sub.task.rewardPerWorker);
 
-      // 1. Pay Worker
       await prisma.wallet.update({
         where: { id: sub.worker.walletId },
         data: { unusedBalance: { increment: reward } }
       });
 
-      // 2. Deduct from Client (Funds should be in lockedFunds if task is LIVE)
-      // We need to find the Client's wallet linked to the task
       const client = await prisma.user.findUnique({
         where: { id: sub.task.clientId },
         include: { wallet: true }
@@ -370,13 +353,26 @@ router.get("/referrals", async (req, res) => {
   }
 });
 
-// 8. CREATE TASK (Admin Direct)
+// 8. CREATE TASK (Admin Direct) - UPDATED
 router.post("/tasks/create", async (req, res) => {
   try {
-    const { title, type, description, rewardPerWorker, numberOfWorkers, totalCost } = req.body;
+    const { title, type, description, rewardPerWorker, numberOfWorkers } = req.body;
     
-    // Since this is Admin creating it, we use Admin ID as client, or the system.
-    // Let's use the Admin's ID as the clientId for tracking purposes.
+    // --- VALIDATION ---
+    if (!title || !description || !rewardPerWorker || !numberOfWorkers) {
+        return res.status(400).json({ error: "Missing required fields." });
+    }
+
+    // Ensure number of workers is a valid integer >= 1
+    const numWorkers = parseInt(numberOfWorkers);
+    if (numWorkers < 1) {
+        return res.status(400).json({ error: "Number of workers must be at least 1." });
+    }
+
+    const reward = parseFloat(rewardPerWorker);
+    const totalCost = reward * numWorkers;
+
+    // Use Admin ID as clientId
     const clientId = req.user.id;
 
     await prisma.task.create({
@@ -385,13 +381,14 @@ router.post("/tasks/create", async (req, res) => {
         title,
         taskType: type,
         description,
-        instructions: description, // mapping description to instructions
-        rewardPerWorker: parseFloat(rewardPerWorker),
-        numberOfWorkers: parseInt(numberOfWorkers),
+        instructions: description, 
+        rewardPerWorker: reward,
+        numberOfWorkers: numWorkers,
         totalCost: parseFloat(totalCost),
         clientBudget: parseFloat(totalCost),
         adminPrice: parseFloat(totalCost),
-        status: "LIVE" // Admin tasks go live immediately
+        status: "LIVE",
+        proofRequired: true // <--- FIXED: Missing field added
       }
     });
 
