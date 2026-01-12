@@ -1,11 +1,13 @@
 const express = require("express");
 const prisma = require("../prismaClient");
-const { requireUser } = require("../middleware/authMiddleware");
+const { requireUser, requireWorker } = require("../middleware/authMiddleware");
 
 const router = express.Router();
 
-// 🔒 All routes in this file require authentication
-router.use(requireUser);
+// 🔒 GLOBAL MIDDLEWARE: 
+// 1. Must be logged in
+// 2. Must be a WORKER (Prevents clients from accessing worker endpoints)
+router.use(requireUser, requireWorker);
 
 // ========================
 // 1. GET AVAILABLE TASKS
@@ -13,7 +15,8 @@ router.use(requireUser);
 // Frontend calls: GET /api/tasks
 router.get("/", async (req, res) => {
   try {
-    // Fetch tasks that are LIVE
+    console.log(`[Worker Routes] Fetching tasks for user: ${req.user.email}`);
+    
     const tasks = await prisma.task.findMany({
       where: { status: "LIVE" },
       select: {
@@ -22,8 +25,6 @@ router.get("/", async (req, res) => {
         description: true,
         taskType: true,
         rewardPerWorker: true,
-        // Map DB field 'rewardPerWorker' to frontend 'pay'
-        // Map DB field 'description' to frontend 'desc'
       }
     });
 
@@ -32,7 +33,7 @@ router.get("/", async (req, res) => {
       ...t,
       pay: t.rewardPerWorker,
       desc: t.description,
-      time: "~10 mins" // Default time for now
+      time: "~10 mins" 
     }));
 
     res.json(formattedTasks);
@@ -52,11 +53,12 @@ router.post("/submit", async (req, res) => {
     const userId = req.user.id;
     const { taskId, proof, taskTitle } = req.body;
 
+    console.log(`[Worker Routes] Task submission attempt by ${userId}`);
+
     if (!taskId || !proof) {
       return res.status(400).json({ error: "Task ID and Proof are required" });
     }
 
-    // Check if user is verified
     if (req.user.verificationStatus !== "VERIFIED") {
       return res.status(403).json({ error: "You must be verified to submit tasks." });
     }
@@ -67,7 +69,7 @@ router.post("/submit", async (req, res) => {
         taskId: taskId,
         workerId: userId,
         proof: proof,
-        status: "PENDING"
+        status: "PENDING" // Tasks are pending approval (standard practice)
       }
     });
 
@@ -88,7 +90,6 @@ router.put("/profile", async (req, res) => {
     const userId = req.user.id;
     const { fullName, telephone, country, place, paymentEmail } = req.body;
 
-    // Update User
     const updatedUser = await prisma.user.update({
       where: { id: userId },
       data: {
@@ -109,13 +110,13 @@ router.put("/profile", async (req, res) => {
 });
 
 // ========================
-// 4. REQUEST WITHDRAWAL
+// 4. REQUEST WITHDRAWAL (FIXED PATH)
 // ========================
-// Frontend calls: POST /api/client/withdraw
-router.post("/", async (req, res) => {
+// Frontend needs to call: POST /api/worker/withdraw
+router.post("/withdraw", async (req, res) => {
   try {
     const userId = req.user.id;
-    const { amount, method, address } = req.body; // Frontend sends 'address' for details
+    const { amount, method, address } = req.body;
 
     const withdrawAmount = parseFloat(amount);
 
@@ -123,34 +124,40 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ error: "Invalid amount" });
     }
 
-    // 1. Find Wallet
-    const wallet = await prisma.wallet.findUnique({
+    // 1. SAFETY CHECK: Does wallet exist? If not, create it (Auto-fix for dev)
+    let wallet = await prisma.wallet.findUnique({
       where: { userId: userId }
     });
 
     if (!wallet) {
-      return res.status(404).json({ error: "Wallet not found" });
+      console.log(`[Wallet] Wallet not found for ${userId}. Creating...`);
+      wallet = await prisma.wallet.create({
+        data: {
+          userId: userId,
+          unusedBalance: 0,
+          lockedBalance: 0
+        }
+      });
     }
 
-    // 2. Check Balance (using unusedBalance for withdrawable amount)
+    // 2. Check Balance
     if (wallet.unusedBalance < withdrawAmount) {
       return res.status(400).json({ error: "Insufficient balance" });
     }
 
     // 3. Create Withdrawal Transaction
-    // We use Decimal type conversion
     await prisma.walletTransaction.create({
       data: {
         walletId: wallet.id,
         type: "WITHDRAWAL",
         amount: withdrawAmount,
         provider: method,
-        externalData: { address: address }, // Storing address/details in JSON
+        externalData: { address: address },
         status: "PENDING"
       }
     });
 
-    // 4. Deduct from Balance immediately (Locking funds)
+    // 4. Deduct from Balance
     await prisma.wallet.update({
       where: { id: wallet.id },
       data: {

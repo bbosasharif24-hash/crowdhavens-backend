@@ -1,16 +1,20 @@
 const prisma = require("../prismaClient");
 
 /**
- * Middleware to attach the authenticated user to req.user
- * It checks the 'x-user-id' header first, then falls back to ?userId= query param.
+ * Middleware to attach the authenticated user to req.user.
+ * It checks the 'x-user-id' header (Secure) first.
+ * FALLBACK: It checks 'userId' query param (Use with caution!).
  */
 async function requireUser(req, res, next) {
   try {
-    // 1. Try to get userId from Header
+    // 1. Priority: Check Header (Secure)
     let userId = req.headers["x-user-id"];
 
-    // 2. Fallback: Try to get userId from Query Parameter (used in Admin fetchInterviews)
+    // 2. Fallback: Check Query Param (For Read-Only operations only, ideally)
+    // Note: Be careful allowing query params for POST/PUT requests as it's insecure.
     if (!userId && req.query.userId) {
+      // ⚠️ SECURITY WARNING: Only allow query param for GET requests usually.
+      // For now, we keep it to match your current frontend logic.
       userId = req.query.userId;
     }
 
@@ -25,10 +29,10 @@ async function requireUser(req, res, next) {
       select: {
         id: true,
         email: true,
-        role: true,
+        role: true, // CRITICAL: We need the role!
         fullName: true,
         verificationStatus: true,
-        // Add other fields you might need globally here
+        balance: true, // Helpful to have immediately available
       }
     });
 
@@ -40,7 +44,7 @@ async function requireUser(req, res, next) {
     // 6. Attach user to request object
     req.user = user;
     
-    // 7. Continue to the next middleware/route
+    // 7. Continue
     next();
 
   } catch (error) {
@@ -49,4 +53,39 @@ async function requireUser(req, res, next) {
   }
 }
 
-module.exports = { requireUser };
+/**
+ * Role Guard: Only allows WORKERS
+ */
+function requireWorker(req, res, next) {
+  if (req.user.role !== "WORKER") {
+    return res.status(403).json({ error: "Forbidden: Workers only" });
+  }
+  next();
+}
+
+/**
+ * Role Guard: Only allows CLIENTS
+ */
+function requireClient(req, res, next) {
+  if (req.user.role !== "CLIENT") {
+    return res.status(403).json({ error: "Forbidden: Clients only" });
+  }
+  next();
+}
+
+/**
+ * Role Guard: Only allows ADMINS
+ */
+function requireAdmin(req, res, next) {
+  if (req.user.role !== "ADMIN") {
+    return res.status(403).json({ error: "Forbidden: Admins only" });
+  }
+  next();
+}
+
+module.exports = { 
+  requireUser, 
+  requireWorker, 
+  requireClient, 
+  requireAdmin 
+};

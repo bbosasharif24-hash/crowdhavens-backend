@@ -1,11 +1,11 @@
 const express = require("express");
 const prisma = require("../prismaClient");
-const { requireUser } = require("../middleware/authMiddleware");
+const { requireUser, requireClient } = require("../middleware/authMiddleware");
 
 const router = express.Router();
 
-// 🔒 All routes in this file require authentication
-router.use(requireUser);
+// 🔒 All routes in this file require authentication AND Client Role
+router.use(requireUser, requireClient);
 
 // ========================
 // 0. GET CLIENT PROFILE & BALANCE
@@ -21,16 +21,11 @@ router.get("/me", async (req, res) => {
 
     // 2. Return combined data
     res.json({
-      // User Profile Data
       id: req.user.id,
       email: req.user.email,
-      fullName: req.user.fullName || "", // Safe access
+      fullName: req.user.fullName || "",
       country: req.user.country || "",
-      place: req.user.place || "",
-      telephone: req.user.telephone || "",
       role: req.user.role,
-      
-      // Wallet Data
       walletBalance: wallet ? wallet.unusedBalance : 0.00
     });
 
@@ -41,23 +36,16 @@ router.get("/me", async (req, res) => {
 });
 
 // ========================
-// 1. GET CLIENT BALANCE (Legacy Support)
+// 1. GET CLIENT BALANCE
 // ========================
 router.get("/balance", async (req, res) => {
   try {
-    // req.user is attached by our middleware
     const userId = req.user.id;
-
-    // Find wallet for this user
     const wallet = await prisma.wallet.findUnique({
       where: { userId: userId }
     });
 
-    if (!wallet) {
-      // Return 0 if no wallet exists yet
-      return res.json({ balance: 0.00 });
-    }
-
+    if (!wallet) return res.json({ balance: 0.00 });
     res.json({ balance: wallet.unusedBalance });
 
   } catch (error) {
@@ -72,15 +60,11 @@ router.get("/balance", async (req, res) => {
 router.get("/tasks", async (req, res) => {
   try {
     const userId = req.user.id;
-
-    // Fetch all tasks where clientId matches the logged-in user
     const tasks = await prisma.task.findMany({
       where: { clientId: userId },
       orderBy: { createdAt: 'desc' }
     });
-
     res.json(tasks);
-
   } catch (error) {
     console.error("Error fetching tasks:", error);
     res.status(500).json({ error: "Failed to fetch tasks" });
@@ -88,14 +72,13 @@ router.get("/tasks", async (req, res) => {
 });
 
 // ========================
-// 3. CREATE NEW TASK (PROPOSAL)
+// 3. CREATE NEW TASK
 // ========================
 router.post("/task", async (req, res) => {
   try {
     const userId = req.user.id;
     const { title, type, desc, clientBudget, taskQty } = req.body;
 
-    // Validation
     if (!title || !desc || !clientBudget || !taskQty) {
       return res.status(400).json({ error: "Missing required fields" });
     }
@@ -107,24 +90,21 @@ router.post("/task", async (req, res) => {
       return res.status(400).json({ error: "Quantity and Budget must be positive" });
     }
 
-    // Calculate per-worker pay
-    // Note: We assume clientBudget is the TOTAL amount they want to spend
     const rewardPerWorker = totalBudget / qty;
 
-    // Create the Task
     const newTask = await prisma.task.create({
       data: {
         clientId: userId,
         title: title,
-        taskType: type, // Mapping frontend 'type' to schema 'taskType'
+        taskType: type,
         description: desc,
-        instructions: desc, // Re-using description for instructions for now
+        instructions: desc,
         clientBudget: totalBudget,
-        adminPrice: null, // Admin sets this later
+        adminPrice: null,
         rewardPerWorker: rewardPerWorker,
         numberOfWorkers: qty,
         totalCost: totalBudget,
-        status: "PENDING_PRICING" // Skip DRAFT, go straight to Admin Review
+        status: "PENDING_PRICING" 
       }
     });
 
@@ -133,6 +113,115 @@ router.post("/task", async (req, res) => {
   } catch (error) {
     console.error("Error creating task:", error);
     res.status(500).json({ error: "Failed to create task" });
+  }
+});
+
+// ========================
+// 4. GET SUBMISSIONS (PENDING REVIEW)
+// ========================
+// Frontend calls: GET /api/client/submissions?taskId=XYZ
+router.get("/submissions", async (req, res) => {
+  try {
+    const clientId = req.user.id;
+    const { taskId } = req.query;
+
+    // Find submissions for tasks owned by this client
+    const submissions = await prisma.taskSubmission.findMany({
+      where: {
+        task: {
+          clientId: clientId
+        },
+        ...(taskId && { taskId: taskId }) // Filter by task ID if provided
+      },
+      include: {
+        task: { select: { title: true } }, // Include task title for display
+        worker: { select: { email: true, fullName: true } } // Include worker info
+      },
+      orderBy: { submittedAt: 'desc' }
+    });
+
+    res.json(submissions);
+
+  } catch (error) {
+    console.error("Error fetching submissions:", error);
+    res.status(500).json({ error: "Failed to fetch submissions" });
+  }
+});
+
+// ========================
+// 5. REVIEW SUBMISSION (APPROVE / REJECT)
+// ========================
+// Frontend calls: PUT /api/client/review
+router.put("/review", async (req, res) => {
+  try {
+    const { submissionId, action } = req.body; // action: 'approve' or 'reject'
+
+    if (!submissionId || !action) {
+      return res.status(400).json({ error: "Submission ID and Action are required" });
+    }
+
+    if (action !== 'approve' && action !== 'reject') {
+      return res.status(400).json({ error: "Invalid action" });
+    }
+
+    // 1. Find Submission
+    const submission = await prisma.taskSubmission.findUnique({
+      where: { id: submissionId },
+      include: { task: true }
+    });
+
+    if (!submission) return res.status(404).json({ error: "Submission not found" });
+
+    // 2. Verify Client owns this Task
+    if (submission.task.clientId !== req.user.id) {
+      return res.status(403).json({ error: "You do not own this task" });
+    }
+
+    // 3. Update Status
+    const updateData = { status: action === 'approve' ? 'APPROVED' : 'REJECTED' };
+    
+    await prisma.taskSubmission.update({
+      where: { id: submissionId },
+      data: updateData
+    });
+
+    // 4. IF APPROVED: Pay the Worker
+    if (action === 'approve') {
+      // Find or Create Worker Wallet
+      let workerWallet = await prisma.wallet.findUnique({
+        where: { userId: submission.workerId }
+      });
+
+      if (!workerWallet) {
+        workerWallet = await prisma.wallet.create({
+          data: { userId: submission.workerId, unusedBalance: 0, lockedBalance: 0 }
+        });
+      }
+
+      // Add Funds to Worker
+      await prisma.wallet.update({
+        where: { id: workerWallet.id },
+        data: {
+          unusedBalance: { increment: submission.task.rewardPerWorker }
+        }
+      });
+
+      // (Optional) Create a Transaction record for the worker
+      await prisma.walletTransaction.create({
+        data: {
+          walletId: workerWallet.id,
+          type: "TASK_PAYMENT",
+          amount: submission.task.rewardPerWorker,
+          status: "COMPLETED"
+        }
+      });
+    }
+
+    res.json({ message: `Submission ${action}d successfully` });
+
+  } catch (error) {
+    console.error("Error reviewing submission:", error);
+    res.status(500).json({ error: "Failed to review submission" });
   }
 });
 

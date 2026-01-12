@@ -1,22 +1,37 @@
 const express = require("express");
-const prisma = require("../prismaClient");
-const { requireUser } = require("../middleware/authMiddleware");
-
 const router = express.Router();
+const prisma = require("../prismaClient");
 
-// 🔒 All routes in this file require authentication
-router.use(requireUser);
+// ================= MIDDLEWARE =================
+// Simple check to ensure user is admin (Assuming auth is handled globally or via header)
+const isAdmin = async (req, res, next) => {
+  const userId = req.headers["x-user-id"];
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+  
+  const user = await prisma.user.findUnique({ where: { id: userId } });
+  if (user.role !== "ADMIN") {
+    return res.status(403).json({ error: "Forbidden: Admins only" });
+  }
+  req.user = user; // Attach user to request
+  next();
+};
 
-// ========================
-// 1. OVERVIEW STATS
-// ========================
+// Apply to all routes
+router.use(isAdmin);
+
+// ================= HELPERS =================
+// Helper to safely convert Prisma Decimals to Numbers for JSON responses
+const safeJson = (data) => {
+  return JSON.parse(JSON.stringify(data, (key, value) =>
+    typeof value === 'bigint' ? value.toString() : value // or handle Decimal
+  ));
+};
+
+// ================= ROUTES =================
+
+// 1. STATS OVERVIEW
 router.get("/stats", async (req, res) => {
   try {
-    // Ensure user is ADMIN
-    if (req.user.role !== "ADMIN") {
-      return res.status(403).json({ error: "Admin access required" });
-    }
-
     const [
       pendingTasks,
       pendingFunding,
@@ -41,443 +56,349 @@ router.get("/stats", async (req, res) => {
       pendingSubmissions,
       liveTasks
     });
-
-  } catch (error) {
-    console.error("Error fetching stats:", error);
-    res.status(500).json({ error: "Failed to fetch stats" });
+  } catch (err) {
+    console.error("Stats Error:", err);
+    res.status(500).json({ error: err.message });
   }
 });
 
-// ========================
-// 2. VERIFICATIONS ($1)
-// ========================
-
-// GET Pending Verifications
+// 2. VERIFICATIONS ($1 Fee)
 router.get("/verifications", async (req, res) => {
   try {
-    if (req.user.role !== "ADMIN") return res.status(403).json({ error: "Admin only" });
-
-    const requests = await prisma.verificationRequest.findMany({
+    const verifications = await prisma.verificationRequest.findMany({
       where: { status: "PENDING" },
-      include: { user: { select: { email: true, fullName: true, referredBy: true } } },
-      orderBy: { createdAt: 'desc' }
+      orderBy: { createdAt: "desc" },
+      include: { user: { select: { fullName: true, email: true } } }
     });
-
-    res.json(requests);
-
-  } catch (error) {
-    console.error("Error fetching verifications:", error);
-    res.status(500).json({ error: "Failed to fetch verifications" });
+    res.json(verifications);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
-// Approve Verification
-router.post("/verifications/:id/approve", async (req, res) => {
+router.post("/verifications/:id/:action(approve|reject)", async (req, res) => {
+  const { id, action } = req.params;
+  
   try {
-    if (req.user.role !== "ADMIN") return res.status(403).json({ error: "Admin only" });
-    
-    const { id } = req.params;
-
-    // 1. Update Request Status
-    const reqRecord = await prisma.verificationRequest.update({
-      where: { id: id },
-      data: { status: "APPROVED" },
+    const verif = await prisma.verificationRequest.findUnique({
+      where: { id },
       include: { user: true }
     });
 
-    // 2. Update User Status
-    await prisma.user.update({
-      where: { id: reqRecord.userId },
-      data: { verificationStatus: "VERIFIED" }
+    if (!verif) return res.status(404).json({ error: "Request not found" });
+    if (verif.status !== "PENDING") return res.status(400).json({ error: "Already processed" });
+
+    const newStatus = action === "approve" ? "APPROVED" : "REJECTED";
+
+    // Update Request Status
+    await prisma.verificationRequest.update({
+      where: { id },
+      data: { status: newStatus }
     });
 
-    // 3. Handle Referral Bonus ($0.50)
-    if (reqRecord.user.referredBy) {
-      // Find referrer (User.referredBy stores email)
-      const referrer = await prisma.user.findUnique({
-        where: { email: reqRecord.user.referredBy }
+    // If Approved
+    if (action === "approve") {
+      // 1. Update User Verification Status
+      await prisma.user.update({
+        where: { id: verif.userId },
+        data: { verificationStatus: "VERIFIED", emailVerified: true }
       });
 
-      if (referrer) {
-        await prisma.referralPayout.create({
-          data: {
-            referrerEmail: referrer.email,
-            newUserEmail: reqRecord.user.email,
-            amount: 0.50,
-            status: "LOGGED"
-          }
+      // 2. Handle Referral ($0.50 Bonus)
+      if (verif.user.referredBy && !verif.referralTriggered) {
+        // Find the referrer by email (Schema says referredBy is String email)
+        const referrer = await prisma.user.findUnique({
+          where: { email: verif.user.referredBy },
+          include: { wallet: true }
         });
-        // Optional: Add to referrer wallet immediately or require manual payout
-        // For now, we just LOG it as per schema
+
+        if (referrer && referrer.wallet) {
+          // Log Payout
+          await prisma.referralPayout.create({
+            data: {
+              referrerEmail: referrer.email,
+              newUserEmail: verif.user.email,
+              amount: 0.50,
+              status: "LOGGED"
+            }
+          });
+
+          // Pay Referrer
+          await prisma.wallet.update({
+            where: { id: referrer.wallet.id },
+            data: {
+              unusedBalance: { increment: 0.50 }
+            }
+          });
+
+          // Mark referral as triggered in verification request
+          await prisma.verificationRequest.update({
+            where: { id },
+            data: { referralTriggered: true }
+          });
+        }
       }
     }
 
-    res.json({ message: "Verification approved" });
-
-  } catch (error) {
-    console.error("Error approving verification:", error);
-    res.status(500).json({ error: "Failed to approve verification" });
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Verification Action Error:", err);
+    res.status(500).json({ error: err.message });
   }
 });
 
-// Reject Verification
-router.post("/verifications/:id/reject", async (req, res) => {
-  try {
-    if (req.user.role !== "ADMIN") return res.status(403).json({ error: "Admin only" });
-
-    await prisma.verificationRequest.update({
-      where: { id: req.params.id },
-      data: { status: "REJECTED" }
-    });
-
-    res.json({ message: "Verification rejected" });
-
-  } catch (error) {
-    console.error("Error rejecting verification:", error);
-    res.status(500).json({ error: "Failed to reject verification" });
-  }
-});
-
-// ========================
-// 3. CLIENT TASKS (PRICING)
-// ========================
-
-// GET Pending Pricing Tasks
+// 3. CLIENT TASKS (Pricing)
 router.get("/tasks/pending-pricing", async (req, res) => {
   try {
-    if (req.user.role !== "ADMIN") return res.status(403).json({ error: "Admin only" });
-
     const tasks = await prisma.task.findMany({
       where: { status: "PENDING_PRICING" },
-      include: { 
-        client: { select: { fullName: true, email: true, id: true } } 
-      }
+      include: { client: { select: { fullName: true, email: true } } },
+      orderBy: { createdAt: "desc" }
     });
-
     res.json(tasks);
-
-  } catch (error) {
-    console.error("Error fetching tasks:", error);
-    res.status(500).json({ error: "Failed to fetch tasks" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
-// Set Price & Approve Task
 router.post("/tasks/:id/set-price", async (req, res) => {
+  const { id } = req.params;
+  const { action, adminPrice } = req.body;
+
   try {
-    if (req.user.role !== "ADMIN") return res.status(403).json({ error: "Admin only" });
-
-    const { id } = req.params;
-    const { adminPrice, action } = req.body;
-
     if (action === "rejected") {
       await prisma.task.update({
-        where: { id: id },
+        where: { id },
         data: { status: "REJECTED", rejectionReason: "Admin rejected proposal" }
       });
-      return res.json({ message: "Task rejected" });
-    }
+    } else if (action === "approved") {
+      // Calculate Total Cost based on Admin Price
+      const task = await prisma.task.findUnique({ where: { id } });
+      const totalCost = parseFloat(adminPrice) * task.numberOfWorkers;
 
-    if (!adminPrice) return res.status(400).json({ error: "Price is required" });
-
-    // Update Task
-    const task = await prisma.task.update({
-      where: { id: id },
-      data: {
-        adminPrice: parseFloat(adminPrice),
-        status: "AWAITING_FUNDING" // Client must now deposit
-      }
-    });
-
-    res.json(task);
-
-  } catch (error) {
-    console.error("Error setting price:", error);
-    res.status(500).json({ error: "Failed to update task" });
-  }
-});
-
-// ========================
-// 4. CLIENT FUNDS (DEPOSITS)
-// ========================
-
-// GET Pending Deposits
-router.get("/transactions/pending-deposits", async (req, res) => {
-  try {
-    if (req.user.role !== "ADMIN") return res.status(403).json({ error: "Admin only" });
-
-    const deposits = await prisma.walletTransaction.findMany({
-      where: { type: "DEPOSIT", status: "PENDING" },
-      include: { wallet: { include: { user: { select: { fullName: true, email: true } } } } }
-    });
-
-    res.json(deposits);
-
-  } catch (error) {
-    console.error("Error fetching deposits:", error);
-    res.status(500).json({ error: "Failed to fetch deposits" });
-  }
-});
-
-// Approve Deposit (Adds funds to wallet)
-router.post("/transactions/:id/approve-deposit", async (req, res) => {
-  try {
-    if (req.user.role !== "ADMIN") return res.status(403).json({ error: "Admin only" });
-
-    const { id } = req.params;
-    
-    // Get Transaction
-    const tx = await prisma.walletTransaction.findUnique({ where: { id } });
-    if (!tx) return res.status(404).json({ error: "Transaction not found" });
-
-    // 1. Update Transaction Status
-    await prisma.walletTransaction.update({
-      where: { id: id },
-      data: { status: "CONFIRMED" }
-    });
-
-    // 2. Add to Wallet
-    await prisma.wallet.update({
-      where: { id: tx.walletId },
-      data: { 
-        unusedBalance: { increment: tx.amount },
-        totalDeposited: { increment: tx.amount }
-      }
-    });
-
-    // 3. Check if linked to a task (via externalData)
-    // Note: You'll need to store taskId in externalData when creating the deposit request on frontend.
-    // Assuming externalData looks like { taskId: "..." }
-    // @ts-ignore
-    if (tx.externalData && tx.externalData.taskId) {
-      // @ts-ignore
-      const taskId = tx.externalData.taskId;
-      
-      // Check if task exists and is waiting
-      const task = await prisma.task.findUnique({ where: { id: taskId } });
-      
-      if (task && task.status === "AWAITING_FUNDING") {
-        // Task becomes LIVE!
-        await prisma.task.update({
-          where: { id: taskId },
-          data: { status: "LIVE" }
-        });
-      }
-    }
-
-    res.json({ message: "Deposit approved, wallet updated" });
-
-  } catch (error) {
-    console.error("Error approving deposit:", error);
-    res.status(500).json({ error: "Failed to approve deposit" });
-  }
-});
-
-// ========================
-// 5. WITHDRAWALS
-// ========================
-
-// GET Pending Withdrawals
-router.get("/transactions/pending-withdrawals", async (req, res) => {
-  try {
-    if (req.user.role !== "ADMIN") return res.status(403).json({ error: "Admin only" });
-
-    const withdrawals = await prisma.walletTransaction.findMany({
-      where: { type: "WITHDRAWAL", status: "PENDING" },
-      include: { wallet: { include: { user: { select: { fullName: true, email: true } } } } }
-    });
-
-    res.json(withdrawals);
-
-  } catch (error) {
-    console.error("Error fetching withdrawals:", error);
-    res.status(500).json({ error: "Failed to fetch withdrawals" });
-  }
-});
-
-// Approve Withdrawal
-router.post("/transactions/:id/approve-withdrawal", async (req, res) => {
-  try {
-    if (req.user.role !== "ADMIN") return res.status(403).json({ error: "Admin only" });
-
-    await prisma.walletTransaction.update({
-      where: { id: req.params.id },
-      data: { status: "CONFIRMED" }
-    });
-
-    res.json({ message: "Withdrawal marked as paid" });
-
-  } catch (error) {
-    console.error("Error approving withdrawal:", error);
-    res.status(500).json({ error: "Failed to approve withdrawal" });
-  }
-});
-
-// ========================
-// 6. TASK SUBMISSIONS
-// ========================
-
-// GET Pending Submissions
-router.get("/submissions/pending", async (req, res) => {
-  try {
-    if (req.user.role !== "ADMIN") return res.status(403).json({ error: "Admin only" });
-
-    const subs = await prisma.taskSubmission.findMany({
-      where: { status: "PENDING" },
-      include: {
-        task: { select: { title: true, rewardPerWorker: true } },
-        worker: { select: { email: true, fullName: true } }
-      },
-      orderBy: { submittedAt: 'desc' }
-    });
-
-    res.json(subs);
-
-  } catch (error) {
-    console.error("Error fetching submissions:", error);
-    res.status(500).json({ error: "Failed to fetch submissions" });
-  }
-});
-
-// Approve Submission (Pay Worker)
-router.post("/submissions/:id/approve", async (req, res) => {
-  try {
-    if (req.user.role !== "ADMIN") return res.status(403).json({ error: "Admin only" });
-
-    const { id } = req.params;
-
-    // Get Submission with Task details
-    const sub = await prisma.taskSubmission.findUnique({
-      where: { id },
-      include: { task: true }
-    });
-
-    if (!sub) return res.status(404).json({ error: "Submission not found" });
-
-    // 1. Update Submission
-    await prisma.taskSubmission.update({
-      where: { id },
-      data: { status: "APPROVED" }
-    });
-
-    // 2. Pay Worker (Add to Wallet)
-    await prisma.wallet.update({
-      where: { userId: sub.workerId },
-      data: { unusedBalance: { increment: sub.task.rewardPerWorker } }
-    });
-
-    // 3. Record Transaction for Worker
-    const workerWallet = await prisma.wallet.findUnique({ where: { userId: sub.workerId } });
-    if (workerWallet) {
-      await prisma.walletTransaction.create({
+      await prisma.task.update({
+        where: { id },
         data: {
-          walletId: workerWallet.id,
-          type: "DEPOSIT", // It's a deposit from platform to worker
-          amount: sub.task.rewardPerWorker,
-          status: "CONFIRMED",
-          provider: "Task Reward"
+          adminPrice: parseFloat(adminPrice),
+          totalCost: totalCost,
+          status: "AWAITING_FUNDING" // Move to next stage
         }
       });
     }
 
-    res.json({ message: "Submission approved and worker paid" });
-
-  } catch (error) {
-    console.error("Error approving submission:", error);
-    res.status(500).json({ error: "Failed to approve submission" });
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Task Pricing Error:", err);
+    res.status(500).json({ error: err.message });
   }
 });
 
-// Reject Submission
-router.post("/submissions/:id/reject", async (req, res) => {
+// 4. CLIENT FUNDS (Deposits)
+router.get("/transactions/pending-deposits", async (req, res) => {
   try {
-    if (req.user.role !== "ADMIN") return res.status(403).json({ error: "Admin only" });
+    const txs = await prisma.walletTransaction.findMany({
+      where: { type: "DEPOSIT", status: "PENDING" },
+      include: {
+        wallet: {
+          include: {
+            user: { select: { fullName: true, email: true } }
+          }
+        }
+      },
+      orderBy: { createdAt: "desc" }
+    });
+    res.json(txs);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
-    await prisma.taskSubmission.update({
-      where: { id: req.params.id },
-      data: { status: "REJECTED" }
+router.post("/transactions/:id/approve-deposit", async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const tx = await prisma.walletTransaction.findUnique({
+      where: { id },
+      include: { wallet: true }
     });
 
-    res.json({ message: "Submission rejected" });
+    if (!tx || tx.type !== "DEPOSIT" || tx.status !== "PENDING") {
+      return res.status(400).json({ error: "Invalid transaction" });
+    }
 
-  } catch (error) {
-    console.error("Error rejecting submission:", error);
-    res.status(500).json({ error: "Failed to reject submission" });
-  }
-});
-
-// ========================
-// 7. REFERRALS
-// ========================
-
-// GET Referrals
-router.get("/referrals", async (req, res) => {
-  try {
-    if (req.user.role !== "ADMIN") return res.status(403).json({ error: "Admin only" });
-
-    const refs = await prisma.referralPayout.findMany({
-      orderBy: { createdAt: 'desc' }
+    // Update Transaction Status
+    await prisma.walletTransaction.update({
+      where: { id },
+      data: { status: "CONFIRMED" }
     });
 
-    res.json(refs);
-
-  } catch (error) {
-    console.error("Error fetching referrals:", error);
-    res.status(500).json({ error: "Failed to fetch referrals" });
-  }
-});
-
-// ========================
-
-
-  // ========================
-// 8. ADMIN CREATE TASK
-// ========================
-router.post("/tasks/create", async (req, res) => {
-  try {
-    if (req.user.role !== "ADMIN") return res.status(403).json({ error: "Admin only" });
-
-    const { title, type, description, rewardPerWorker, numberOfWorkers, totalCost } = req.body;
-
-    // 1. Validation
-    if (!title || !type || !description) {
-      return res.status(400).json({ error: "Missing required text fields" });
-    }
-
-    const workers = parseInt(numberOfWorkers);
-    const reward = parseFloat(rewardPerWorker);
-    const total = parseFloat(totalCost);
-
-    if (isNaN(workers) || isNaN(reward) || isNaN(total)) {
-      return res.status(400).json({ error: "Invalid numeric values" });
-    }
-
-    // 2. Create Task
-    const newTask = await prisma.task.create({
+    // Add funds to Wallet
+    await prisma.wallet.update({
+      where: { id: tx.walletId },
       data: {
-        clientId: req.user.id, // Auth ensures this exists
-        title: title,
-        taskType: type,         // Frontend sends 'type'
-        description: description,
-        instructions: description,
-        rewardPerWorker: reward, // Prisma Decimal
-        numberOfWorkers: workers,   // Prisma Int
-        totalCost: total,         // Prisma Decimal
-        clientBudget: total,
-        adminPrice: reward,         // Admin sets final price directly
-        status: "LIVE"             // Admin tasks go live immediately
+        totalDeposited: { increment: parseFloat(tx.amount) },
+        unusedBalance: { increment: parseFloat(tx.amount) }
       }
     });
 
-    res.json(newTask);
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Deposit Error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
-  } catch (error) {
-    console.error("Error creating admin task:", error);
-    // Catch Prisma validation errors specifically
-    if (error.code === 'P2002') { 
-       return res.status(400).json({ error: "Invalid data input" });
+// 5. WITHDRAWALS
+router.get("/transactions/pending-withdrawals", async (req, res) => {
+  try {
+    const txs = await prisma.walletTransaction.findMany({
+      where: { type: "WITHDRAWAL", status: "PENDING" },
+      include: {
+        wallet: {
+          include: {
+            user: { select: { fullName: true, email: true } }
+          }
+        }
+      },
+      orderBy: { createdAt: "desc" }
+    });
+    res.json(txs);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post("/transactions/:id/approve-withdrawal", async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    await prisma.walletTransaction.update({
+      where: { id },
+      data: { status: "CONFIRMED" } // Or a specific PAID status if you prefer
+    });
+
+    // Note: The funds were likely locked/deducted when the request was created. 
+    // If not, deduct unusedBalance here. Assuming standard flow where funds are locked on request.
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Withdrawal Error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 6. TASK SUBMISSIONS
+router.get("/submissions/pending", async (req, res) => {
+  try {
+    const subs = await prisma.taskSubmission.findMany({
+      where: { status: "PENDING" },
+      include: {
+        task: { select: { title: true, rewardPerWorker: true } },
+        worker: { select: { email: true } }
+      },
+      orderBy: { submittedAt: "desc" }
+    });
+    res.json(subs);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post("/submissions/:id/:action(approve|reject)", async (req, res) => {
+  const { id, action } = req.params;
+
+  try {
+    const sub = await prisma.taskSubmission.findUnique({
+      where: { id },
+      include: {
+        task: true,
+        worker: { include: { wallet: true } }
+      }
+    });
+
+    if (!sub) return res.status(404).json({ error: "Submission not found" });
+
+    const newStatus = action === "approve" ? "APPROVED" : "REJECTED";
+
+    // Update Submission
+    await prisma.taskSubmission.update({
+      where: { id },
+      data: { status: newStatus }
+    });
+
+    // If Approved, Pay Worker and Handle Task Finances
+    if (action === "approve") {
+      const reward = parseFloat(sub.task.rewardPerWorker);
+
+      // 1. Pay Worker
+      await prisma.wallet.update({
+        where: { id: sub.worker.walletId },
+        data: { unusedBalance: { increment: reward } }
+      });
+
+      // 2. Deduct from Client (Funds should be in lockedFunds if task is LIVE)
+      // We need to find the Client's wallet linked to the task
+      const client = await prisma.user.findUnique({
+        where: { id: sub.task.clientId },
+        include: { wallet: true }
+      });
+
+      if (client && client.wallet) {
+        await prisma.wallet.update({
+          where: { id: client.wallet.id },
+          data: { lockedFunds: { decrement: reward } }
+        });
+      }
     }
-    res.status(500).json({ error: "Failed to create task" });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Submission Action Error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 7. REFERRALS
+router.get("/referrals", async (req, res) => {
+  try {
+    const refs = await prisma.referralPayout.findMany({
+      orderBy: { createdAt: "desc" }
+    });
+    res.json(refs);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 8. CREATE TASK (Admin Direct)
+router.post("/tasks/create", async (req, res) => {
+  try {
+    const { title, type, description, rewardPerWorker, numberOfWorkers, totalCost } = req.body;
+    
+    // Since this is Admin creating it, we use Admin ID as client, or the system.
+    // Let's use the Admin's ID as the clientId for tracking purposes.
+    const clientId = req.user.id;
+
+    await prisma.task.create({
+      data: {
+        clientId,
+        title,
+        taskType: type,
+        description,
+        instructions: description, // mapping description to instructions
+        rewardPerWorker: parseFloat(rewardPerWorker),
+        numberOfWorkers: parseInt(numberOfWorkers),
+        totalCost: parseFloat(totalCost),
+        clientBudget: parseFloat(totalCost),
+        adminPrice: parseFloat(totalCost),
+        status: "LIVE" // Admin tasks go live immediately
+      }
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Create Task Error:", err);
+    res.status(500).json({ error: err.message });
   }
 });
 
